@@ -85,6 +85,11 @@ FONT_TITLE = ("Segoe UI Semibold", 30)
 FONT_SUBTITLE = ("Segoe UI", 14)
 FONT_BODY = ("Segoe UI", 13)
 
+DEFAULT_CITY_SUGGESTIONS = [
+     "solapur"
+     "Mumbai"
+]
+
 
 def geocode_city(city_name: str) -> tuple[float, float, str]:
     """Convert a city name into coordinates and a short display label."""
@@ -400,6 +405,17 @@ class WeatherApp(ctk.CTk):
         )
         self.city_entry.grid(row=0, column=0, sticky="ew", padx=(0, 14))
         self.city_entry.bind("<Return>", self.start_fetch)
+        self.city_entry.bind("<FocusIn>", self._on_city_focus)
+        self.city_entry.bind("<KeyRelease>", self._on_city_input)
+
+        self.suggestions_frame = ctk.CTkFrame(
+            self.search_panel,
+            fg_color="transparent",
+        )
+        self.suggestions_frame.grid(row=2, column=0, sticky="ew", padx=24, pady=(0, 12))
+        self.suggestions_frame.grid_columnconfigure(0, weight=1)
+        self.suggestion_buttons = []
+        self._suggestion_after_id = None
 
         self.fetch_button = ctk.CTkButton(
             self.search_row,
@@ -451,7 +467,7 @@ class WeatherApp(ctk.CTk):
 
         self.temperature_value = ctk.CTkLabel(
             self.temperature_card,
-            text="-- C",
+            text="-- ℃",
             font=ctk.CTkFont(family=FONT_DISPLAY[0], size=64, weight="bold"),
             text_color=TEXT_PRIMARY,
         )
@@ -560,19 +576,98 @@ class WeatherApp(ctk.CTk):
                 lambda: self._update_weather_ui(location_label, current_weather),
             )
         except ValueError as exc:
-            self.after(0, lambda: self._handle_error(f"Input error: {exc}"))
+            self.after(0, lambda exc=exc: self._handle_error(f"Input error: {exc}"))
         except ConnectionError as exc:
-            self.after(0, lambda: self._handle_error(f"Connection error: {exc}"))
+            self.after(0, lambda exc=exc: self._handle_error(f"Connection error: {exc}"))
         except KeyError as exc:
-            self.after(0, lambda: self._handle_error(f"Data error: {exc}"))
+            self.after(0, lambda exc=exc: self._handle_error(f"Data error: {exc}"))
         except Exception as exc:
-            self.after(0, lambda: self._handle_error(f"Unexpected error: {exc}"))
+            self.after(0, lambda exc=exc: self._handle_error(f"Unexpected error: {exc}"))
+
+    def _on_city_input(self, _event=None) -> None:
+        query = self.city_entry.get().strip()
+        if self._suggestion_after_id is not None:
+            self.after_cancel(self._suggestion_after_id)
+            self._suggestion_after_id = None
+
+        if not query:
+            self._update_city_suggestions(DEFAULT_CITY_SUGGESTIONS)
+            return
+
+        if len(query) < 2:
+            self._update_city_suggestions(
+                [city for city in DEFAULT_CITY_SUGGESTIONS if city.lower().startswith(query.lower())]
+            )
+            return
+
+        self._suggestion_after_id = self.after(250, lambda q=query: self._fetch_city_suggestions(q))
+
+    def _on_city_focus(self, _event=None) -> None:
+        query = self.city_entry.get().strip()
+        if not query:
+            self._update_city_suggestions(DEFAULT_CITY_SUGGESTIONS)
+
+    def _fetch_city_suggestions(self, query: str) -> None:
+        def worker() -> None:
+            try:
+                geolocator = Nominatim(user_agent="weather_city_dashboard_suggestions")
+                results = geolocator.geocode(
+                    query,
+                    exactly_one=False,
+                    limit=6,
+                    addressdetails=True,
+                    timeout=10,
+                )
+                suggestions = []
+                if results:
+                    for location in results:
+                        if location and location.address:
+                            display = location.address.split(",")[0]
+                            if display not in suggestions:
+                                suggestions.append(display)
+                                if len(suggestions) >= 5:
+                                    break
+                self.after(0, lambda: self._update_city_suggestions(suggestions))
+            except Exception:
+                self.after(0, self._clear_city_suggestions)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_city_suggestions(self, suggestions: list[str]) -> None:
+        self._clear_city_suggestions()
+        if not suggestions:
+            return
+
+        for index, city_name in enumerate(suggestions):
+            button = ctk.CTkButton(
+                self.suggestions_frame,
+                text=city_name,
+                height=36,
+                fg_color=PANEL_ALT_COLOR,
+                hover_color=ACCENT_HOVER,
+                text_color=TEXT_PRIMARY,
+                font=ctk.CTkFont(family=FONT_BODY[0], size=14),
+                corner_radius=14,
+                command=lambda value=city_name: self._on_city_suggestion_selected(value),
+            )
+            button.grid(row=index, column=0, sticky="ew", pady=(0, 6))
+            self.suggestion_buttons.append(button)
+
+    def _clear_city_suggestions(self) -> None:
+        for button in self.suggestion_buttons:
+            button.destroy()
+        self.suggestion_buttons = []
+
+    def _on_city_suggestion_selected(self, city_name: str) -> None:
+        self.city_entry.delete(0, "end")
+        self.city_entry.insert(0, city_name)
+        self._clear_city_suggestions()
 
     def _update_weather_ui(self, location_label: str, current_weather: dict) -> None:
         """Update dashboard values after a successful weather lookup."""
         self.location_label.configure(text=location_label)
         self.temperature_value.configure(
-            text=f"{round(current_weather['temperature'])} C"
+            text=f"{round(current_weather['temperature'])} ℃"
         )
         self.humidity_card.value_label.configure(
             text=f"{round(current_weather['humidity'])}%"
